@@ -1,0 +1,463 @@
+name: Build APK
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Gerar projeto
+        run: |
+          mkdir -p app/src/main/res/drawable-nodpi app/src/main/res/values app/src/main/java/com/gengar/rec
+          cat > settings.gradle.kts <<'EOF_314667'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "GengarRec"
+          include(":app")
+          EOF_314667
+          cat > build.gradle.kts <<'EOF_739044'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF_739044
+          cat > gradle.properties <<'EOF_796649'
+          org.gradle.jvmargs=-Xmx2g
+          android.useAndroidX=false
+          EOF_796649
+          cat > app/build.gradle.kts <<'EOF_111990'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+          android {
+              namespace = "com.gengar.rec"
+              compileSdk = 34
+              defaultConfig {
+                  applicationId = "com.gengar.rec"
+                  minSdk = 29
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+              buildTypes {
+                  release {
+                      isMinifyEnabled = true
+                      isShrinkResources = true
+                      signingConfig = signingConfigs.getByName("debug")
+                  }
+              }
+              compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          EOF_111990
+          cat > app/src/main/AndroidManifest.xml <<'EOF_116503'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+              <uses-permission android:name="android.permission.RECORD_AUDIO" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+              <application
+                  android:label="Gengar Rec"
+                  android:icon="@drawable/gengar_art"
+                  android:theme="@style/App"
+                  android:allowBackup="false">
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+                  <service
+                      android:name=".RecorderService"
+                      android:exported="false"
+                      android:foregroundServiceType="mediaProjection|microphone" />
+              </application>
+          </manifest>
+          EOF_116503
+          cat > app/src/main/res/values/colors.xml <<'EOF_301755'
+          <resources><color name="bg">#07040C</color></resources>
+          EOF_301755
+          cat > app/src/main/res/values/styles.xml <<'EOF_577364'
+          <resources>
+              <style name="App" parent="@android:style/Theme.Material.NoActionBar">
+                  <item name="android:windowBackground">@color/bg</item>
+                  <item name="android:statusBarColor">@color/bg</item>
+                  <item name="android:navigationBarColor">@color/bg</item>
+              </style>
+          </resources>
+          EOF_577364
+          cat > app/src/main/java/com/gengar/rec/RecorderService.kt <<'EOF_101039'
+          package com.gengar.rec
+
+          import android.app.*
+          import android.content.ContentValues
+          import android.content.Context
+          import android.content.Intent
+          import android.content.pm.ServiceInfo
+          import android.hardware.display.DisplayManager
+          import android.hardware.display.VirtualDisplay
+          import android.media.MediaRecorder
+          import android.media.projection.MediaProjection
+          import android.media.projection.MediaProjectionManager
+          import android.net.Uri
+          import android.os.*
+          import android.provider.MediaStore
+          import android.util.DisplayMetrics
+          import android.view.Display
+          import android.widget.Toast
+          import java.text.SimpleDateFormat
+          import java.util.*
+          import kotlin.math.min
+          import kotlin.math.roundToInt
+
+          class RecorderService : Service() {
+              companion object {
+                  const val ACTION_START = "start"
+                  const val ACTION_STOP = "stop"
+                  private const val CH = "gengar_rec"
+              }
+
+              private var projection: MediaProjection? = null
+              private var vd: VirtualDisplay? = null
+              private var recorder: MediaRecorder? = null
+              private var pfd: ParcelFileDescriptor? = null
+              private var uri: Uri? = null
+              private var recording = false
+              private val handler = Handler(Looper.getMainLooper())
+              private var pendingStart: Runnable? = null
+
+              override fun onBind(i: Intent?): IBinder? = null
+
+              private fun cfg(k: String, d: String) =
+                  getSharedPreferences("cfg", Context.MODE_PRIVATE).getString(k, d) ?: d
+
+              override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+                  when (intent?.action) {
+                      ACTION_STOP -> { stopRecording(); stopSelf() }
+                      ACTION_START -> {
+                          val code = intent.getIntExtra("code", 0)
+                          @Suppress("DEPRECATION")
+                          val data: Intent? = if (Build.VERSION.SDK_INT >= 33)
+                              intent.getParcelableExtra("data", Intent::class.java) else intent.getParcelableExtra("data")
+                          val mic = cfg("mic", "0") == "1"
+                          val delay = cfg("delay", "3").toInt()
+                          goForeground(if (delay > 0) "Começa em ${delay}s…" else "Gravando…", mic)
+                          if (data == null) { stopSelf(); return START_NOT_STICKY }
+                          val run = Runnable { startRecording(code, data, mic) }
+                          pendingStart = run
+                          handler.postDelayed(run, delay * 1000L)
+                      }
+                  }
+                  return START_NOT_STICKY
+              }
+
+              private fun goForeground(text: String, mic: Boolean) {
+                  val nm = getSystemService(NotificationManager::class.java)
+                  nm.createNotificationChannel(NotificationChannel(CH, "Gravação", NotificationManager.IMPORTANCE_LOW))
+                  val stop = PendingIntent.getService(
+                      this, 0, Intent(this, RecorderService::class.java).setAction(ACTION_STOP),
+                      PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+                  )
+                  val n = Notification.Builder(this, CH)
+                      .setContentTitle("Gengar Rec")
+                      .setContentText(text)
+                      .setSmallIcon(android.R.drawable.presence_video_online)
+                      .setOngoing(true)
+                      .addAction(Notification.Action.Builder(null, "PARAR", stop).build())
+                      .build()
+                  var type = ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+                  if (mic && Build.VERSION.SDK_INT >= 30) type = type or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                  startForeground(1, n, type)
+              }
+
+              private fun a16(v: Float) = ((v / 16f).roundToInt() * 16).coerceAtLeast(16)
+
+              private fun startRecording(code: Int, data: Intent, mic: Boolean) {
+                  try {
+                      val target = cfg("res", "720").toInt()
+                      val fps = cfg("fps", "60").toInt()
+                      val mbps = cfg("mbps", "6").toInt()
+                      val hevc = cfg("codec", "h264") == "hevc"
+
+                      val dm = DisplayMetrics()
+                      @Suppress("DEPRECATION")
+                      (getSystemService(DISPLAY_SERVICE) as DisplayManager)
+                          .getDisplay(Display.DEFAULT_DISPLAY).getRealMetrics(dm)
+                      val scale = min(1f, target.toFloat() / min(dm.widthPixels, dm.heightPixels))
+                      val w = a16(dm.widthPixels * scale)
+                      val h = a16(dm.heightPixels * scale)
+
+                      val name = "Gengar_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + ".mp4"
+                      val cv = ContentValues().apply {
+                          put(MediaStore.Video.Media.DISPLAY_NAME, name)
+                          put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+                          put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/GengarRec")
+                          put(MediaStore.Video.Media.IS_PENDING, 1)
+                      }
+                      uri = contentResolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, cv)
+                      pfd = contentResolver.openFileDescriptor(uri!!, "w")
+
+                      val r = if (Build.VERSION.SDK_INT >= 31) MediaRecorder(this) else @Suppress("DEPRECATION") MediaRecorder()
+                      if (mic) r.setAudioSource(MediaRecorder.AudioSource.MIC)
+                      r.setVideoSource(MediaRecorder.VideoSource.SURFACE)
+                      r.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+                      r.setVideoEncoder(if (hevc) MediaRecorder.VideoEncoder.HEVC else MediaRecorder.VideoEncoder.H264)
+                      if (mic) {
+                          r.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+                          r.setAudioEncodingBitRate(96_000)
+                          r.setAudioSamplingRate(44_100)
+                      }
+                      r.setVideoSize(w, h)
+                      r.setVideoFrameRate(fps)
+                      r.setVideoEncodingBitRate(mbps * 1_000_000)
+                      r.setOutputFile(pfd!!.fileDescriptor)
+                      r.prepare()
+                      recorder = r
+
+                      val mpm = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                      projection = mpm.getMediaProjection(code, data).also {
+                          it.registerCallback(object : MediaProjection.Callback() {
+                              override fun onStop() { handler.post { stopRecording(); stopSelf() } }
+                          }, handler)
+                      }
+                      vd = projection!!.createVirtualDisplay(
+                          "gengar", w, h, dm.densityDpi,
+                          DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, r.surface, null, null
+                      )
+                      r.start()
+                      recording = true
+                      goForeground("Gravando ${w}x${h} · ${fps}fps · ${mbps}Mbps", mic)
+                  } catch (e: Exception) {
+                      Toast.makeText(this, "Erro ao gravar: ${e.message}", Toast.LENGTH_LONG).show()
+                      cleanup(false)
+                      stopSelf()
+                  }
+              }
+
+              private fun stopRecording() {
+                  pendingStart?.let { handler.removeCallbacks(it) }
+                  pendingStart = null
+                  val was = recording
+                  recording = false
+                  cleanup(was)
+                  if (was) Toast.makeText(this, "Salvo em Filmes/GengarRec", Toast.LENGTH_LONG).show()
+              }
+
+              private fun cleanup(ok: Boolean) {
+                  try { if (ok) recorder?.stop() } catch (_: Exception) {}
+                  try { recorder?.release() } catch (_: Exception) {}
+                  try { vd?.release() } catch (_: Exception) {}
+                  try { projection?.stop() } catch (_: Exception) {}
+                  try { pfd?.close() } catch (_: Exception) {}
+                  uri?.let {
+                      if (ok) contentResolver.update(it, ContentValues().apply {
+                          put(MediaStore.Video.Media.IS_PENDING, 0)
+                      }, null, null) else contentResolver.delete(it, null, null)
+                  }
+                  recorder = null; vd = null; projection = null; pfd = null; uri = null
+              }
+
+              override fun onDestroy() { stopRecording(); super.onDestroy() }
+          }
+          EOF_101039
+          cat > app/src/main/java/com/gengar/rec/MainActivity.kt <<'EOF_692625'
+          package com.gengar.rec
+
+          import android.Manifest
+          import android.app.Activity
+          import android.content.Intent
+          import android.content.SharedPreferences
+          import android.content.pm.PackageManager
+          import android.graphics.Color
+          import android.graphics.Typeface
+          import android.graphics.drawable.GradientDrawable
+          import android.media.projection.MediaProjectionManager
+          import android.os.Build
+          import android.os.Bundle
+          import android.view.Gravity
+          import android.view.ViewGroup.LayoutParams.MATCH_PARENT
+          import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+          import android.widget.*
+
+          class MainActivity : Activity() {
+              private val PURPLE = Color.parseColor("#C95BD6")
+              private val CARD = Color.parseColor("#1A1124")
+              private val MUTED = Color.parseColor("#B79BC4")
+              private val DEF = mapOf(
+                  "res" to "720", "fps" to "60", "mbps" to "6",
+                  "codec" to "h264", "mic" to "0", "delay" to "3"
+              )
+              private lateinit var sp: SharedPreferences
+              private val refreshers = mutableListOf<() -> Unit>()
+
+              private fun get(k: String) = sp.getString(k, DEF[k]) ?: DEF[k]!!
+              private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+              private fun refreshAll() = refreshers.forEach { it() }
+
+              private fun shape(color: Int, r: Int = 12) = GradientDrawable().apply {
+                  setColor(color); cornerRadius = dp(r).toFloat()
+              }
+
+              private fun text(t: String, size: Float, color: Int, bold: Boolean = false) = TextView(this).apply {
+                  text = t; textSize = size; setTextColor(color)
+                  if (bold) typeface = Typeface.DEFAULT_BOLD
+              }
+
+              override fun onCreate(b: Bundle?) {
+                  super.onCreate(b)
+                  sp = getSharedPreferences("cfg", MODE_PRIVATE)
+
+                  val root = LinearLayout(this).apply {
+                      orientation = LinearLayout.VERTICAL
+                      setPadding(dp(20), dp(16), dp(20), dp(28))
+                  }
+
+                  // Cabeçalho com a arte do Gengar
+                  root.addView(ImageView(this).apply {
+                      setImageResource(R.drawable.gengar_art)
+                      adjustViewBounds = true
+                      layoutParams = LinearLayout.LayoutParams(dp(220), WRAP_CONTENT).apply { gravity = Gravity.CENTER_HORIZONTAL }
+                  })
+                  root.addView(text("GENGAR REC", 26f, PURPLE, true).apply {
+                      gravity = Gravity.CENTER; letterSpacing = 0.15f
+                  })
+                  root.addView(text("gravador de tela leve · 60 fps", 13f, MUTED).apply {
+                      gravity = Gravity.CENTER; setPadding(0, dp(2), 0, dp(14))
+                  })
+
+                  // Presets
+                  root.addView(label("PRESETS"))
+                  val presets = LinearLayout(this)
+                  fun preset(name: String, vals: Map<String, String>) {
+                      presets.addView(text(name, 14f, Color.BLACK, true).apply {
+                          gravity = Gravity.CENTER
+                          background = shape(PURPLE)
+                          setPadding(0, dp(12), 0, dp(12))
+                          layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { setMargins(dp(3), 0, dp(3), 0) }
+                          setOnClickListener {
+                              sp.edit().apply { vals.forEach { (k, v) -> putString(k, v) } }.apply()
+                              refreshAll()
+                          }
+                      })
+                  }
+                  preset("Leve (A07)", mapOf("res" to "540", "fps" to "60", "mbps" to "4", "codec" to "h264"))
+                  preset("Equilibrado", mapOf("res" to "720", "fps" to "60", "mbps" to "6", "codec" to "h264"))
+                  preset("Qualidade", mapOf("res" to "1080", "fps" to "60", "mbps" to "10", "codec" to "h264"))
+                  root.addView(presets)
+
+                  segmented(root, "RESOLUÇÃO", "res", listOf("480p", "540p", "720p", "1080p"), listOf("480", "540", "720", "1080"))
+                  segmented(root, "FPS", "fps", listOf("24", "30", "45", "60"), listOf("24", "30", "45", "60"))
+                  segmented(root, "BITRATE (Mbps)", "mbps", listOf("2", "4", "6", "8", "12"), listOf("2", "4", "6", "8", "12"))
+                  segmented(root, "CODEC", "codec", listOf("H.264 (leve)", "H.265 (menor arquivo)"), listOf("h264", "hevc"))
+                  segmented(root, "ÁUDIO", "mic", listOf("Sem áudio", "Microfone"), listOf("0", "1"))
+                  segmented(root, "CONTAGEM ANTES DE GRAVAR", "delay", listOf("0s", "3s", "5s", "10s"), listOf("0", "3", "5", "10"))
+
+                  val info = text("", 13f, MUTED).apply { setPadding(0, dp(16), 0, dp(12)); gravity = Gravity.CENTER }
+                  root.addView(info)
+                  refreshers += {
+                      val gbh = get("mbps").toInt() * 0.45
+                      info.text = "${get("res")}p · ${get("fps")}fps · ${get("mbps")} Mbps  ≈  ${"%.1f".format(gbh)} GB por hora"
+                  }
+
+                  root.addView(text("●  GRAVAR", 20f, Color.BLACK, true).apply {
+                      gravity = Gravity.CENTER
+                      background = shape(PURPLE, 18)
+                      setPadding(0, dp(18), 0, dp(18))
+                      setOnClickListener { onRecord() }
+                  })
+                  root.addView(text(
+                      "Ao iniciar, escolha \"Tela inteira\". Pare pela notificação (botão PARAR). Vídeos ficam em Filmes/GengarRec.",
+                      12f, MUTED
+                  ).apply { gravity = Gravity.CENTER; setPadding(0, dp(12), 0, 0) })
+
+                  setContentView(ScrollView(this).apply { addView(root, MATCH_PARENT, WRAP_CONTENT) })
+                  refreshAll()
+              }
+
+              private fun label(t: String) = text(t, 11f, MUTED, true).apply {
+                  letterSpacing = 0.1f; setPadding(dp(4), dp(16), 0, dp(6))
+              }
+
+              private fun segmented(root: LinearLayout, title: String, key: String, labels: List<String>, values: List<String>) {
+                  root.addView(label(title))
+                  val row = LinearLayout(this)
+                  val tvs = labels.mapIndexed { i, l ->
+                      text(l, 13f, MUTED, true).apply {
+                          gravity = Gravity.CENTER
+                          setPadding(dp(2), dp(12), dp(2), dp(12))
+                          layoutParams = LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f).apply { setMargins(dp(3), 0, dp(3), 0) }
+                          setOnClickListener { sp.edit().putString(key, values[i]).apply(); refreshAll() }
+                      }
+                  }
+                  tvs.forEach { row.addView(it) }
+                  root.addView(row)
+                  refreshers += {
+                      tvs.forEachIndexed { i, t ->
+                          val on = get(key) == values[i]
+                          t.background = shape(if (on) PURPLE else CARD)
+                          t.setTextColor(if (on) Color.BLACK else MUTED)
+                      }
+                  }
+              }
+
+              private fun onRecord() {
+                  val need = mutableListOf<String>()
+                  if (get("mic") == "1" && checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED)
+                      need += Manifest.permission.RECORD_AUDIO
+                  if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
+                      need += Manifest.permission.POST_NOTIFICATIONS
+                  if (need.isNotEmpty()) requestPermissions(need.toTypedArray(), 2) else launchCapture()
+              }
+
+              override fun onRequestPermissionsResult(rc: Int, p: Array<out String>, r: IntArray) {
+                  super.onRequestPermissionsResult(rc, p, r)
+                  if (rc == 2) {
+                      if (get("mic") == "1" && checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                          sp.edit().putString("mic", "0").apply(); refreshAll()
+                          Toast.makeText(this, "Sem permissão do microfone: gravando sem áudio", Toast.LENGTH_SHORT).show()
+                      }
+                      launchCapture()
+                  }
+              }
+
+              private fun launchCapture() {
+                  val mpm = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                  @Suppress("DEPRECATION")
+                  startActivityForResult(mpm.createScreenCaptureIntent(), 1)
+              }
+
+              @Suppress("DEPRECATION")
+              override fun onActivityResult(req: Int, res: Int, data: Intent?) {
+                  super.onActivityResult(req, res, data)
+                  if (req == 1 && res == RESULT_OK && data != null) {
+                      startForegroundService(
+                          Intent(this, RecorderService::class.java)
+                              .setAction(RecorderService.ACTION_START)
+                              .putExtra("code", res)
+                              .putExtra("data", data)
+                      )
+                      moveTaskToBack(true)
+                  }
+              }
+          }
+          EOF_692625
+          f=$(ls *.png *.jpg *.jpeg *.webp 2>/dev/null | head -1)
+          out=app/src/main/res/drawable-nodpi/gengar_art.png
+          if [ -n "$f" ] && convert "$f" -crop 56%x33%+144+465 +repage -resize 300x "$out"; then echo imagem-ok; else echo 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==' | base64 -d > "$out"; fi
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.7
+      - run: gradle assembleDebug --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Gengar-Rec-apk
+          path: app/build/outputs/apk/debug/*.apk
