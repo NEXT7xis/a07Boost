@@ -1,0 +1,195 @@
+name: Build APK
+on: [push, workflow_dispatch]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: 17 }
+      - name: Criar projeto
+        run: |
+          mkdir -p $(dirname settings.gradle.kts)
+          cat > settings.gradle.kts <<'EOF_2157'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "GengarRes"
+          include(":app")
+          EOF_2157
+          mkdir -p $(dirname build.gradle.kts)
+          cat > build.gradle.kts <<'EOF_9766'
+          plugins {
+              id("com.android.application") version "8.5.0" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF_9766
+          mkdir -p $(dirname gradle.properties)
+          cat > gradle.properties <<'EOF_488'
+          android.useAndroidX=true
+          org.gradle.jvmargs=-Xmx2g
+          EOF_488
+          mkdir -p $(dirname app/build.gradle.kts)
+          cat > app/build.gradle.kts <<'EOF_7901'
+          plugins { id("com.android.application"); id("org.jetbrains.kotlin.android") }
+          android {
+              namespace = "com.gengar.res"
+              compileSdk = 34
+              defaultConfig { applicationId = "com.gengar.res"; minSdk = 26; targetSdk = 34; versionCode = 1; versionName = "1.0" }
+              buildFeatures { compose = true }
+              composeOptions { kotlinCompilerExtensionVersion = "1.5.14" }
+              compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          dependencies {
+              implementation(platform("androidx.compose:compose-bom:2024.06.00"))
+              implementation("androidx.compose.ui:ui")
+              implementation("androidx.compose.material3:material3")
+              implementation("androidx.activity:activity-compose:1.9.0")
+              implementation("dev.rikka.shizuku:api:13.1.5")
+              implementation("dev.rikka.shizuku:provider:13.1.5")
+          }
+          EOF_7901
+          mkdir -p $(dirname app/src/main/AndroidManifest.xml)
+          cat > app/src/main/AndroidManifest.xml <<'EOF_5587'
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <application android:label="Gengar Res" android:icon="@drawable/ic_launcher" android:theme="@style/AppTheme">
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN"/>
+                          <category android:name="android.intent.category.LAUNCHER"/>
+                      </intent-filter>
+                  </activity>
+                  <provider android:name="rikka.shizuku.ShizukuProvider"
+                      android:authorities="${applicationId}.shizuku"
+                      android:multiprocess="false" android:enabled="true" android:exported="true"
+                      android:permission="android.permission.INTERACT_ACROSS_USERS_FULL"/>
+              </application>
+          </manifest>
+          EOF_5587
+          mkdir -p $(dirname app/src/main/res/values/themes.xml)
+          cat > app/src/main/res/values/themes.xml <<'EOF_9139'
+          <resources>
+              <style name="AppTheme" parent="android:Theme.Material.NoActionBar">
+                  <item name="android:windowBackground">#000000</item>
+                  <item name="android:statusBarColor">#000000</item>
+                  <item name="android:navigationBarColor">#000000</item>
+              </style>
+          </resources>
+          EOF_9139
+          mkdir -p $(dirname app/src/main/res/drawable/ic_launcher.xml)
+          cat > app/src/main/res/drawable/ic_launcher.xml <<'EOF_583'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+              <path android:fillColor="#000000" android:pathData="M0,0h108v108h-108z"/>
+              <path android:fillColor="#D14FD6" android:pathData="M26,30 L40,50 L68,50 L82,30 L84,62 Q54,92 24,62 Z"/>
+              <path android:fillColor="#FFFFFF" android:pathData="M32,62 Q54,84 76,62 Q54,70 32,62 Z"/>
+              <path android:fillColor="#000000" android:pathData="M36,52 L48,56 L36,60 Z M72,52 L60,56 L72,60 Z"/>
+          </vector>
+          EOF_583
+          mkdir -p $(dirname app/src/main/java/com/gengar/res/MainActivity.kt)
+          cat > app/src/main/java/com/gengar/res/MainActivity.kt <<'EOF_5052'
+          package com.gengar.res
+
+          import android.content.pm.PackageManager
+          import android.os.Bundle
+          import androidx.activity.ComponentActivity
+          import androidx.activity.compose.setContent
+          import androidx.compose.foundation.*
+          import androidx.compose.foundation.layout.*
+          import androidx.compose.foundation.shape.RoundedCornerShape
+          import androidx.compose.foundation.text.KeyboardOptions
+          import androidx.compose.material3.*
+          import androidx.compose.runtime.*
+          import androidx.compose.ui.Alignment
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.graphics.Color
+          import androidx.compose.ui.text.font.FontWeight
+          import androidx.compose.ui.text.input.KeyboardType
+          import androidx.compose.ui.unit.dp
+          import androidx.compose.ui.unit.sp
+          import kotlinx.coroutines.*
+          import rikka.shizuku.Shizuku
+
+          val Pink = Color(0xFFD14FD6)
+          val Dark = Color(0xFF1A0620)
+
+          object Sh {
+              fun run(cmd: String): String {
+                  val m = Shizuku::class.java.getDeclaredMethod(
+                      "newProcess", Array<String>::class.java, Array<String>::class.java, String::class.java)
+                  m.isAccessible = true
+                  val p = m.invoke(null, arrayOf("sh", "-c", cmd), null, null) as Process
+                  val out = p.inputStream.bufferedReader().readText() + p.errorStream.bufferedReader().readText()
+                  p.waitFor()
+                  return out.trim()
+              }
+          }
+
+          class MainActivity : ComponentActivity() {
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  setContent {
+                      MaterialTheme(colorScheme = darkColorScheme(primary = Pink, background = Color.Black, surface = Dark)) {
+                          Surface(Modifier.fillMaxSize(), color = Color.Black) { App() }
+                      }
+                  }
+              }
+          }
+
+          @Composable
+          fun App() {
+              val scope = rememberCoroutineScope()
+              var ready by remember { mutableStateOf(false) }
+              var w by remember { mutableStateOf("1080") }
+              var h by remember { mutableStateOf("1440") }
+              var d by remember { mutableStateOf("320") }
+              var log by remember { mutableStateOf("") }
+
+              fun refresh() {
+                  ready = try { Shizuku.pingBinder() && Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED }
+                  catch (e: Throwable) { false }
+              }
+
+              fun exec(cmd: String) {
+                  scope.launch(Dispatchers.IO) { log = try { Sh.run(cmd).ifEmpty { "Sucesso" } } catch (e: Throwable) { e.message ?: "erro" } }
+              }
+
+              DisposableEffect(Unit) {
+                  val l = Shizuku.OnRequestPermissionResultListener { _, grantResult -> 
+                      ready = grantResult == PackageManager.PERMISSION_GRANTED
+                  }
+                  try {
+                      Shizuku.addRequestPermissionResultListener(l)
+                      refresh()
+                  } catch (e: Throwable) { e.printStackTrace() }
+                  
+                  onDispose { 
+                      try { Shizuku.removeRequestPermissionResultListener(l) } catch (e: Throwable) { e.printStackTrace() }
+                  }
+              }
+
+              Column(
+                  modifier = Modifier
+                      .fillMaxSize()
+                      .padding(24.dp)
+                      .verticalScroll(rememberScrollState()),
+                  horizontalAlignment = Alignment.CenterHorizontally,
+                  verticalArrangement = Arrangement.spacedBy(16.dp)
+              ) {
+                  Text("GENGAR RES", fontSize = 32.sp, fontWeight = FontWeight.Bold, color = Pink)
+                  
+                  Card(
+                      modifier = Modifier.fillMaxWidth(),
+                      shape = RoundedCornerShape(12.dp),
+                      colors = CardDefaults.cardColors(containerColor = Dark)
+                  ) {
+                      Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                          Text("Status do Shizuku:", color = Color.White, fontWeight = FontWeight.SemiBold)
+                          Text(
+                              text = if (ready) "Autorizado" else "Não Autorizado",
+                              color = if (ready) Color.Green else Color.Red,
+                              fontWeight = FontWeight.Bold
+                          )
+                          if (!ready) {
+                              Button(
+                                  onClick = { try { Shizuku.requestPermission(0) } catch(e: Throwable) { log = "Inicie o app do Shizuku primeiro." } },
+                                  colors = ButtonDefaults.buttonColors(containerColor = Pink),
